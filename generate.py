@@ -4,6 +4,17 @@ Generate Python client from IRI OpenAPI specification.
 
 This script can be used standalone or imported into CI/CD pipelines.
 
+Usage examples::
+
+    # Generate from v2 spec with package version 2.1.0
+    python generate.py --api-version 2 --package-version 2.1.0
+
+    # Generate from v1 spec (for comparison or testing)
+    python generate.py --api-version 1 --package-version 1.3.0
+
+    # Use explicit URL (backward compatible)
+    python generate.py --api-url https://custom-host/api/v2/openapi.json
+
 Credit: https://gitlab.com/amsc2/infrastructure-and-services/amsc-interfaces/amsc-api-python
 """
 
@@ -16,7 +27,9 @@ from urllib.request import urlopen
 from urllib.error import URLError
 
 
-DEFAULT_API_URL = "https://iri-dev.ppg.es.net/api/v1/openapi.json"
+DEFAULT_API_BASE = "https://iri-dev.ppg.es.net"
+DEFAULT_API_VERSION = 2
+DEFAULT_API_URL = f"{DEFAULT_API_BASE}/api/v{DEFAULT_API_VERSION}/openapi.json"
 CONFIG_FILE = "config.yaml"
 OUTPUT_DIR = "generated"
 
@@ -35,10 +48,27 @@ def check_tool_installed() -> bool:
     return shutil.which("openapi-generator") is not None
 
 
-def generate_client(api_url: str, config_file: str, output_dir: str, package_name: str) -> bool:
+def generate_client(
+    api_url: str,
+    config_file: str,
+    output_dir: str,
+    package_name: str,
+    package_version: str = None,
+) -> bool:
     """
     Generate the Python client.
     
+    Args:
+        api_url:         OpenAPI spec URL to generate from.
+        config_file:     Path to openapi-generator config file.
+        output_dir:      Output directory for generated code.
+        package_name:    Python package name (e.g. ``amsc_iri``).
+        package_version: If set, passed to openapi-generator via
+                         ``--additional-properties=packageVersion=X.Y.Z``
+                         so the generated ``pyproject.toml`` gets the
+                         correct version string instead of the default
+                         ``1.0.0``.
+
     Returns:
         True if generation was successful, False otherwise.
     """
@@ -52,22 +82,21 @@ def generate_client(api_url: str, config_file: str, output_dir: str, package_nam
         shutil.rmtree(output_path)
     
     # Build command
-    #cmd = [
-    #    "openapi-python-client",
-    #    "generate",
-    #    "--url", api_url,
-    #    "--config", str(config_path),
-    #    "--output-path", str(output_path),
-    #]
-    
     cmd = [
         "openapi-generator",
         "generate",
         "-i", api_url,
         "-g", "python",
         "-o", str(output_path),
-        "--package-name", str(package_name)
+        "--package-name", str(package_name),
     ]
+
+    # Set the package version in the generated pyproject.toml
+    if package_version:
+        cmd.extend([
+            "--additional-properties",
+            f"packageVersion={package_version}",
+        ])
     
     print(f"⚙️  Generating Python client...")
     print(f"   Command: {' '.join(cmd)}")
@@ -91,9 +120,33 @@ def main():
         description="Generate Python client from IRI OpenAPI specification"
     )
     parser.add_argument(
+        "--api-version",
+        type=int,
+        default=None,
+        help=(
+            f"IRI API version to generate from (e.g. 1 or 2). "
+            f"Constructs the spec URL as "
+            f"{DEFAULT_API_BASE}/api/v{{N}}/openapi.json. "
+            f"Overrides --api-url when provided. "
+            f"(default: {DEFAULT_API_VERSION})"
+        ),
+    )
+    parser.add_argument(
         "--api-url",
-        default=DEFAULT_API_URL,
-        help=f"OpenAPI JSON URL (default: {DEFAULT_API_URL})",
+        default=None,
+        help=(
+            f"OpenAPI JSON URL. Ignored when --api-version is given. "
+            f"(default: {DEFAULT_API_URL})"
+        ),
+    )
+    parser.add_argument(
+        "--package-version",
+        default=None,
+        help=(
+            "Version string for the generated pyproject.toml "
+            "(e.g. '2.1.0'). Without this flag the openapi-generator "
+            "defaults to '1.0.0'."
+        ),
     )
     parser.add_argument(
         "--config",
@@ -117,15 +170,29 @@ def main():
     )
     
     args = parser.parse_args()
-    
+
+    # Resolve the API URL: --api-version takes precedence over --api-url
+    if args.api_version is not None:
+        api_url = f"{DEFAULT_API_BASE}/api/v{args.api_version}/openapi.json"
+    elif args.api_url is not None:
+        api_url = args.api_url
+    else:
+        api_url = DEFAULT_API_URL
+
     print("=" * 60)
     print(" IRI Python Client Generator")
     print("=" * 60)
     print()
-    print(f"API URL: {args.api_url}")
-    print(f"Config:  {args.config}")
-    print(f"Output:  {args.output}")
-    print(f"Package name:  {args.package_name}")
+    print(f"API URL:         {api_url}")
+    if args.api_version is not None:
+        print(f"API Version:     v{args.api_version}")
+    print(f"Config:          {args.config}")
+    print(f"Output:          {args.output}")
+    print(f"Package name:    {args.package_name}")
+    if args.package_version:
+        print(f"Package version: {args.package_version}")
+    else:
+        print(f"Package version: (openapi-generator default)")
     print()
     
     # Check if tool is installed
@@ -140,11 +207,11 @@ def main():
     # Check API accessibility
     if not args.skip_check:
         print("🔍 Checking API accessibility...")
-        if check_api_accessibility(args.api_url):
+        if check_api_accessibility(api_url):
             print("✓ API is accessible")
             print()
         else:
-            print(f"❌ Cannot access API at {args.api_url}")
+            print(f"❌ Cannot access API at {api_url}")
             print()
             print("Make sure the API server is running:")
             print("  make")
@@ -154,13 +221,21 @@ def main():
             sys.exit(1)
     
     # Generate client
-    if generate_client(args.api_url, args.config, args.output, args.package_name):
+    if generate_client(
+        api_url,
+        args.config,
+        args.output,
+        args.package_name,
+        package_version=args.package_version,
+    ):
         print()
         print("=" * 60)
         print("  ✅ Client generated successfully!")
         print("=" * 60)
         print()
         print(f"Location: {args.output}")
+        if args.package_version:
+            print(f"Package version: {args.package_version}")
         print()
         print("To install the client:")
         print(f"  cd {args.output}")
