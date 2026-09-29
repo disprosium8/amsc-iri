@@ -6,11 +6,16 @@ This script can be used standalone or imported into CI/CD pipelines.
 
 Usage examples::
 
-    # Generate from v2 spec with package version 2.1.0
-    python generate.py --api-version 2 --package-version 2.1.0
-
-    # Generate from v1 spec (for comparison or testing)
+    # Generate the v1 client (default package name: amsc_iri)
     python generate.py --api-version 1 --package-version 1.3.0
+
+    # Generate the v2 client as a separate package
+    python generate.py --api-version 2 --package-name amsc_iri_v2 \\
+        --project-name amsc-iri-v2 --package-version 2.0.1
+
+    # Both can coexist -- output dirs default to the package name:
+    #   ./amsc_iri/      (v1, import amsc_iri)
+    #   ./amsc_iri_v2/   (v2, import amsc_iri_v2)
 
     # Use explicit URL (backward compatible)
     python generate.py --api-url https://custom-host/api/v2/openapi.json
@@ -31,7 +36,7 @@ DEFAULT_API_BASE = "https://iri-dev.ppg.es.net"
 DEFAULT_API_VERSION = 2
 DEFAULT_API_URL = f"{DEFAULT_API_BASE}/api/v{DEFAULT_API_VERSION}/openapi.json"
 CONFIG_FILE = "config.yaml"
-OUTPUT_DIR = "generated"
+DEFAULT_PACKAGE_NAME = "amsc_iri"
 
 
 def check_api_accessibility(api_url: str) -> bool:
@@ -54,6 +59,7 @@ def generate_client(
     output_dir: str,
     package_name: str,
     package_version: str = None,
+    project_name: str = None,
 ) -> bool:
     """
     Generate the Python client.
@@ -62,12 +68,17 @@ def generate_client(
         api_url:         OpenAPI spec URL to generate from.
         config_file:     Path to openapi-generator config file.
         output_dir:      Output directory for generated code.
-        package_name:    Python package name (e.g. ``amsc_iri``).
+        package_name:    Python package name (e.g. ``amsc_iri``,
+                         ``amsc_iri_v2``).  Controls the import name.
         package_version: If set, passed to openapi-generator via
                          ``--additional-properties=packageVersion=X.Y.Z``
                          so the generated ``pyproject.toml`` gets the
                          correct version string instead of the default
                          ``1.0.0``.
+        project_name:    pip project name for pyproject.toml (e.g.
+                         ``amsc-iri-v2``).  If not given, defaults to
+                         *package_name* with underscores replaced by
+                         hyphens.
 
     Returns:
         True if generation was successful, False otherwise.
@@ -91,11 +102,16 @@ def generate_client(
         "--package-name", str(package_name),
     ]
 
-    # Set the package version in the generated pyproject.toml
+    # Build additional-properties for pyproject.toml metadata
+    additional = []
     if package_version:
+        additional.append(f"packageVersion={package_version}")
+    resolved_project = project_name or package_name.replace("_", "-")
+    additional.append(f"projectName={resolved_project}")
+    if additional:
         cmd.extend([
             "--additional-properties",
-            f"packageVersion={package_version}",
+            ",".join(additional),
         ])
     
     print(f"⚙️  Generating Python client...")
@@ -155,8 +171,11 @@ def main():
     )
     parser.add_argument(
         "--output",
-        default=OUTPUT_DIR,
-        help=f"Output directory (default: {OUTPUT_DIR})",
+        default=None,
+        help=(
+            "Output directory. Defaults to the value of --package-name "
+            f"(e.g. '{DEFAULT_PACKAGE_NAME}' or 'amsc_iri_v2')."
+        ),
     )
     parser.add_argument(
         "--skip-check",
@@ -165,8 +184,20 @@ def main():
     )
     parser.add_argument(
         "--package-name",
-        default="amsc_iri",
-        help="Package name (default: amsc_iri)",
+        default=DEFAULT_PACKAGE_NAME,
+        help=(
+            "Python import package name. Controls the generated module "
+            f"directory name (default: {DEFAULT_PACKAGE_NAME})."
+        ),
+    )
+    parser.add_argument(
+        "--project-name",
+        default=None,
+        help=(
+            "pip project name for pyproject.toml (e.g. 'amsc-iri-v2'). "
+            "Defaults to --package-name with underscores replaced by "
+            "hyphens."
+        ),
     )
     
     args = parser.parse_args()
@@ -179,6 +210,13 @@ def main():
     else:
         api_url = DEFAULT_API_URL
 
+    # Resolve output directory: default to the package name so that
+    # generating v1 and v2 from the same checkout does not collide.
+    output_dir = args.output or args.package_name
+
+    # Resolve pip project name
+    project_name = args.project_name or args.package_name.replace("_", "-")
+
     print("=" * 60)
     print(" IRI Python Client Generator")
     print("=" * 60)
@@ -187,8 +225,9 @@ def main():
     if args.api_version is not None:
         print(f"API Version:     v{args.api_version}")
     print(f"Config:          {args.config}")
-    print(f"Output:          {args.output}")
+    print(f"Output:          {output_dir}")
     print(f"Package name:    {args.package_name}")
+    print(f"Project name:    {project_name}")
     if args.package_version:
         print(f"Package version: {args.package_version}")
     else:
@@ -224,25 +263,23 @@ def main():
     if generate_client(
         api_url,
         args.config,
-        args.output,
+        output_dir,
         args.package_name,
         package_version=args.package_version,
+        project_name=project_name,
     ):
         print()
         print("=" * 60)
-        print("  ✅ Client generated successfully!")
+        print("  Client generated successfully!")
         print("=" * 60)
         print()
-        print(f"Location: {args.output}")
+        print(f"Location: {output_dir}")
         if args.package_version:
             print(f"Package version: {args.package_version}")
         print()
         print("To install the client:")
-        print(f"  cd {args.output}")
+        print(f"  cd {output_dir}")
         print("  pip install -e .")
-        print()
-        print("To run tests:")
-        print("  python tests/test_workflow_simple.py")
         print()
         sys.exit(0)
     else:
